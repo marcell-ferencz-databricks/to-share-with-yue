@@ -26,10 +26,14 @@ from langchain.vectorstores import FAISS
 from langchain_core.messages import SystemMessage
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
-from langchain_core.runnables import RunnablePassthrough
+from langchain_core.runnables import RunnablePassthrough, RunnableParallel
 import openai
 
 langchain.__version__, mlflow.__version__, openai.__version__
+
+# COMMAND ----------
+
+mlflow.langchain.autolog()
 
 # COMMAND ----------
 
@@ -41,12 +45,12 @@ langchain.__version__, mlflow.__version__, openai.__version__
 # COMMAND ----------
 
 # env variables
-os.environ["AZURE_OPENAI_API_KEY"] = "your-azure-openai-api-key"
-os.environ["OPENAI_API_VERSION"] = "api-version (date)"
-os.environ["AZURE_OPENAI_ENDPOINT"] = "your-azure-openai-endpoint"
-os.environ["OPENAI_API_TYPE"] = "azure" # don't change this
-os.environ["OPENAI_DEPLOYMENT_NAME"] = "the deployment name of the GPT4 endpoint"
-os.environ["OPENAI_API_KEY"] = "same azure openai api key as the first line"
+os.environ["AZURE_OPENAI_API_KEY"] = AZURE_OPENAI_API_KEY
+os.environ["OPENAI_API_VERSION"] = OPENAI_API_VERSION
+os.environ["AZURE_OPENAI_ENDPOINT"] = AZURE_OPENAI_ENDPOINT
+os.environ["OPENAI_API_TYPE"] = "azure"
+os.environ["OPENAI_DEPLOYMENT_NAME"] = LLM_JUDGE_DEPLOYMENT_NAME
+os.environ["OPENAI_API_KEY"] = AZURE_OPENAI_API_KEY
 
 # COMMAND ----------
 
@@ -186,7 +190,7 @@ prompt = ChatPromptTemplate.from_messages(
 
 # COMMAND ----------
 
-df_test_data = pd.read_csv(f"{RAW_FILE_PATH})
+df_test_data = pd.read_csv(f"{RAW_FILE_PATH}")
 
 # COMMAND ----------
 
@@ -197,7 +201,7 @@ df_test_data = pd.read_csv(f"{RAW_FILE_PATH})
 
 # COMMAND ----------
 
-my_answer_similarity = mlflow.metrics.genai.answer_similarity()
+my_answer_similarity = mlflow.metrics.genai.answer_similarity(model="openai:/gpt-35-turbo") # model name
 
 # COMMAND ----------
 
@@ -210,20 +214,30 @@ with mlflow.start_run() as run:
     if "OPENAI_API_BASE" in os.environ:
         del os.environ["OPENAI_API_BASE"]
 
+    def format_docs(docs):
+        return "\n\n".join(doc.page_content for doc in docs)
 
-    qa_chain = {"context": vector_db.as_retriever(), "question": RunnablePassthrough()} | prompt | llm | StrOutputParser()
-    qa_chain.invoke("Testing.")
+    rag_chain_from_docs = (
+        RunnablePassthrough.assign(context=(lambda x: format_docs(x["context"])))
+        | prompt
+        | llm
+        | StrOutputParser()
+    )
+
+    rag_chain_with_source = RunnableParallel(
+        {"context": vector_db.as_retriever(), "question": RunnablePassthrough()}
+        ).assign(answer=rag_chain_from_docs)
 
 
     model_info = mlflow.langchain.log_model(
-        qa_chain,
+        rag_chain_with_source,
         artifact_path="retrieval_qa",
         loader_fn=load_retriever,
         persist_dir=vs_persist_directory
         )
     
     df_test_data_ = df_test_data.copy()
-    df_test_data_["answer"] = df_test_data_["inputs"].map(lambda x: qa_chain.invoke(x))
+    df_test_data_["answer"] = df_test_data_["inputs"].map(lambda x: rag_chain_with_source.invoke(x)["answer"])
 
     os.environ["OPENAI_API_BASE"] = AZURE_OPENAI_ENDPOINT
 

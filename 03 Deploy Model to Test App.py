@@ -1,5 +1,5 @@
 # Databricks notebook source
-# MAGIC %pip install --upgrade dbtunnel[gradio] gradio pydantic langchain-openai langchain-community langchain mlflow faiss-cpu textstat
+# MAGIC %pip install --upgrade dbtunnel[gradio] pydantic langchain-openai langchain-community langchain mlflow faiss-cpu
 # MAGIC dbutils.library.restartPython()
 
 # COMMAND ----------
@@ -31,50 +31,100 @@ loaded_model.invoke("What is the framework about really?") # test model
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC # Define basic Gradio Chat Interface
-
-# COMMAND ----------
-
-with gr.Blocks() as demo:
-    gr.Markdown("""
-
-## Ask Questions about the Government's Generative AI framework whitepaper.
-
-#### Questions are compared against paragraphs in the document to find which are the most relevant. The LLM then uses these pages as the basis for its answer.
-
-""")
-    
-    chatbot=gr.Chatbot(height="70%")
-    msg = gr.Textbox(label="Chat")
-    clear = gr.ClearButton([msg, chatbot])
-
-    def user(user_message, history):
-        return "", history + [[user_message, None]]
-
-    def respond(chat_history):
-        bot_message = loaded_model.invoke(chat_history[-1][0])
-        chat_history[-1][1] = ""
-        for character in bot_message:
-            chat_history[-1][1] += character
-            time.sleep(0.05)
-            yield chat_history
-
-    msg.submit(user, [msg, chatbot], [msg, chatbot], queue=False).then(
-        respond, chatbot, chatbot
-    )
-    clear.click(lambda: None, None, chatbot, queue=False)
-    
-
-
-    
-demo.queue()
-
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC # Run Gradio App on cluster
+# MAGIC # Create table to log to
 # MAGIC
-# MAGIC Click the generated link
+# MAGIC CHANGE THE SCHEMA NAME TO YOUR SCHEMA HERE
+
+# COMMAND ----------
+
+# MAGIC %sql
+# MAGIC CREATE TABLE IF NOT EXISTS mde_ai.chat_feedback (
+# MAGIC   id STRING,
+# MAGIC   date DATE,
+# MAGIC   user STRING,
+# MAGIC   user_message STRING,
+# MAGIC   bot_message STRING,
+# MAGIC   liked BOOLEAN
+# MAGIC )
+
+# COMMAND ----------
+
+import gradio as gr
+from typing import List, Tuple
+
+
+
+def vote(value, like_data: gr.LikeData):
+    user_question = value[-1][0]
+    user_question = user_question.replace('"', "'")
+
+    bot_response = like_data.value
+    bot_response = bot_response.replace('"', "'")
+
+    # CHANGE THE SCHEMA NAME TO YOUR SCHEMA
+    spark.sql(f"""
+              INSERT INTO marcell.mde_ai.chat_feedback
+              (id, date, user, user_message, bot_message, liked)
+              (SELECT * FROM VALUES (sha2(concat(current_user(), current_timestamp()), 0), current_timestamp(), current_user(), "{user_question}", "{bot_response}", "{like_data.liked}"))
+              """)
+
+    return None
+
+def format_sources(sources):
+
+
+  sources_formatted = [("..." + d.page_content + "...", d.metadata["title"]) for d in sources]
+
+
+  source_outputs = ""
+  for i, source in enumerate(sources_formatted):
+    split_source = source[0].split("\n")
+    source_joined = "\n > ".join(split_source)
+    source_output = f"""
+  ### Source {i+1}:
+
+  **Document: {source[1]}**
+
+  > {source_joined}
+
+
+  
+
+  ================================================================================================================
+    """
+    source_outputs += source_output
+
+  return source_outputs
+
+
+def chat_response(message: str, history: List[Tuple[str, str]]) -> Tuple[str, List[Tuple[str, str]], str]:
+    # Call your model
+    response = loaded_model.invoke(message)
+    
+    # Extract answer and sources
+    answer = response["answer"]
+    sources = response["context"]
+    sources = format_sources(sources)
+     
+    # Update history with the new message pair
+    history.append((message, answer))
+    
+    # Return the updated history and sources
+    return history, sources
+
+# Create the Gradio interface
+with gr.Blocks() as demo:
+    gr.Markdown("# Ask Questions about the Crown Estate's Health & Safety Policy")
+    chatbot = gr.Chatbot(label="H&S Assistant", show_label=True)
+    msg = gr.Textbox(label="Enter your question", placeholder="Do I have access to any funds for home office equipment?")
+    clear = gr.Button("Clear")
+    sources_box = gr.Markdown(label="Sources")
+    chatbot.like(vote, chatbot)
+    msg.submit(chat_response, 
+               inputs=[msg, chatbot], 
+               outputs=[chatbot, sources_box])
+    clear.click(lambda: ([], ""), 
+                outputs=[chatbot, sources_box])
 
 # COMMAND ----------
 
